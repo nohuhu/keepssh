@@ -21,13 +21,13 @@ around. Close the lid, connection times out; open the lid, it is back up.
 # Usage
 
 `keepssh` is intended to be easy to use. Run it as you would run `ssh`,
-there are no special arguments; e.g.:
-
-    keepssh -o foo=yes -i ~/.ssh/identity -p 2222 foo@bar.baz
-
-Instead of:
+there are no special arguments; e.g. instead of:
 
         ssh -o foo=yes -i ~/.ssh/identity -p 2222 foo@bar.baz
+
+Use this:
+
+    keepssh -o foo=yes -i ~/.ssh/identity -p 2222 foo@bar.baz
 
 All arguments are passed through to `ssh` transparently, except `-f`
 and `-q`; these are handled internally to produce the same behavior:
@@ -49,8 +49,9 @@ variables:
 - `KEEPSSH_SSH=<path>` will force using SSH client at the specified path
 instead of the default `ssh`.
 
-- `KEEPSSH_VERBOSE=<level>` will make `keepssh` log its actions on stderr.
-Values of <level> can be 1 or 2, with greater verbosity at 2.
+- `KEEPSSH_VERBOSE=<level>` will make `keepssh` log non-essential
+information on stderr to help with troubleshooting. Values of <level>
+can be 1 or 2, with greater verbosity at 2.
 
 - `KEEPSSH_DEBUG=<level>` will add debugging information to usual log
 messages. Level=1 will `set -x` and level=2 will `set -xv`, which is a lot
@@ -67,20 +68,22 @@ This is useful for preventing network flooding.
 reconnect attempts (default is 300).
 
 - `KEEPSSH_PIDFILE=<path>` will print the PID of the process to specified
-file. Use this process id to stop `keepssh`, like this:
-
-    kill `cat /tmp/keepssh.pid`
+file. Use this process id to stop `keepssh`.
 
 - `KEEPSSH_LOGFILE=<path>` will divert stderr to the specified file,
 including ssh output on stderr. When both log file and `-q` option
 are used, `keepssh` will create the file but won't print anything
 in it.
 
-- `KEEPSSH_FIFO=<path>` will use the path (or mktemp pattern)
-to create named pipe where ssh stderr will be redirected. This is
-used on old systems where OpenSSH doesn't support ExitOnForwardFailure
-option and we have to parse its stderr for errors.
-Default is whatever your local `mktemp` comes up with.
+- `KEEPSSH_NO_TIMESTAMP=1` will tell `keepssh` not to timestamp log file
+messages. This variable is only meaningful when `KEEPSSH_LOGFILE` is used;
+log messages on stderr are never timestamped.
+
+- `KEEPSSH_FIFO=<path>` will use the path (or mktemp pattern) to create
+named pipe where ssh stderr will be redirected. This is used on old systems
+where OpenSSH doesn't support ExitOnForwardFailure option and we have to
+parse its stderr for errors. Default is whatever your local `mktemp` command
+comes up with.
 
 # Installation
 
