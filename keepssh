@@ -1,0 +1,513 @@
+#!/bin/sh
+#
+# keepssh Copyright (c) 2017 Alex Tokarev.
+#
+# Grab the latest version here: https://github.com/nohuhu/keepssh
+#
+# Released under the MIT (X11) License
+#
+# Permission is hereby granted, free of charge, to any person obtaining
+# a copy of this software and associated documentation files (the "Software"),
+# to deal in the Software without restriction, including without limitation
+# the rights to use, copy, modify, merge, publish, distribute, sublicense,
+# and/or sell copies of the Software, and to permit persons to whom the
+# Software is furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be included
+# in all copies or substantial portions of the Software.
+# 
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+# OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+# DEALINGS IN THE SOFTWARE.
+
+if [ "$KEEPSSH_DEBUG" ]; then
+	[ "$KEEPSSH_DEBUG" -gt 1 ] && set -xv
+	[ "$KEEPSSH_DEBUG" -gt 0 ] && set -x
+fi
+
+# We're always logging on stderr like ssh does but we don't want
+# shell messages about killed processes to litter it, so we dup
+# stderr to /dev/fd/4 and use that one instead. Also saves a lot of
+# typing ">/dev/null 2>&1" since stderr is always null (except
+# when debugging of course).
+exec 4>&2
+
+[ ! "$KEEPSSH_DEBUG" ] && exec 2>/dev/null
+
+# Running in background (-f option) we want to make sure port forwarding
+# is successful if requested. Newer ssh supports ExitOnForwardFailure
+# option, and for old ssh versions we work around by forking a process
+# listen on stderr and terminating ssh whevever a warning is printed.
+# If -q option was requested, ssh won't print anything on stderr and
+# log listener is useless; to work around that we pluck -q option from
+# ssh command line and suppress stderr in keepssh.
+QUIET=
+
+# We also need to know if ssh was requested to fork and go into background
+# so that we could do the same. We don't pass this argument to ssh though
+# because it is kind of awkward finding its pid after it's forked.
+FORK=
+
+# That said, sometimes it's not handy to redirect stderr so we support
+# logging to file as well. We can also timestamp log file messages
+# unless told not to.
+if [ "$KEEPSSH_LOGFILE" ]; then
+    exec 4>>"$KEEPSSH_LOGFILE"
+
+	if [ "$KEEPSSH_NO_TIMESTAMP" ]; then
+		TIMESTAMP=false
+	else
+		TIMESTAMP=date
+	fi
+fi
+
+OWN_BASENAME=`basename $0`
+
+cry () {
+	# Sometimes it's helpful to know when the error happened
+    echo `$TIMESTAMP` "$@" >&4
+}
+
+say () {
+    [ ! "$QUIET" ] && echo `$TIMESTAMP` "$@" >&4
+}
+
+yak () {
+    [ "$KEEPSSH_VERBOSE" -gt 0 ] && echo `$TIMESTAMP` "$@" >&4
+}
+
+gab () {
+    [ "$KEEPSSH_VERBOSE" -gt 1 ] && echo `$TIMESTAMP` "$@" >&4
+}
+
+SSH=${KEEPSSH_SSH-`which ssh`}
+
+if [ ! -x "$SSH" ]; then
+    cry "ERROR: Cannot find ssh executable at \'$SSH\'!"
+    exit 1
+fi
+
+# This approach is not entirely foolproof but working around getopts quirks
+# is not an option at the moment.
+WANT_OPTS=":1246AaCfGgKkMNnqsTtVvXxYyb:c:D:E:e:F:I:i:L:l:m:O:o:p:Q:R:S:W:w:"
+OPTIONS=
+
+while getopts "$WANT_OPTS" OPT; do
+    case $OPT in
+        f)
+            FORK=1
+            ;;
+
+        q)
+            QUIET=1
+            ;;
+
+        *)
+            OPTIONS="$OPTIONS -$OPT"
+
+            if [ "$OPTARG" ]; then
+                case "$OPTARG" in
+                    *\ *) OPTIONS="$OPTIONS '$OPTARG'";;
+                       *) OPTIONS="$OPTIONS $OPTARG";;
+                esac
+            fi
+            ;;
+    esac
+done
+
+shift `expr "$OPTIND" - 1`
+ARGUMENTS=$*
+
+gab "init: found options: \"$OPTIONS\""
+gab "init: found arguments: \"$ARGUMENTS\""
+
+if [ ! "$ARGUMENTS" ]; then
+    $SSH 2>&1 | sed -e 's/^[Uu]sage: ssh/usage: '"$OWN_BASENAME"'/;' >&4
+    cat >&4 <<END
+
+Note that password authentication cannot be used with -f option because
+$BASENAME will run ssh program in background loop without terminal access.
+It is recommended to use public key authentication instead.
+
+END
+    exit 255
+fi
+
+gab "init: Found ssh client: $SSH"
+
+# All this feature detection only applies if we need to go to background.
+# No -f option implies interactive mode and users can decide themselves
+# if they want port forwarding enforced or not.
+if [ "$FORK" ]; then
+    # We don't support password authentication when forking, or any other
+    # input on stdin. If we don't pass -n ssh will complain that stdin
+    # is not attached to a terminal and exit with an error.
+    OPTIONS="-n $OPTIONS"
+    
+    # Now test if our ssh client supports ExitOnForwardFailure option. In order
+    # to do that we try to execute it with an invalid option coming second.
+    # If ssh understands ExitOnForwardFailure it will complain about the second
+    # option, otherwise about the first one.
+    NEED_LOGGERY=
+    
+    $SSH -o ExitOnForwardFailure=yes -o NonexistentOption=yes 2>&1 |\
+        grep ExitOnForwardFailure >&2
+    
+    if [ $? -eq 0 ]; then
+        NEED_LOGGERY=1
+        gab "init: Old ssh client, need log listener"
+    else
+        # If port forwarding was requested we want it to be reliable
+        # and if it wasn't requested then no harm no foul.
+        OPTIONS="-o ExitOnForwardFailure=yes $OPTIONS"
+        gab "init: ssh client supports ExitOnForwardFailure"
+    fi
+    
+    GREP=
+    
+    if [ "$NEED_LOGGERY" ]; then
+        # We also need a grep that can quit on first match. In Linux and other
+        # modern systems GNU grep accepts -q option to do just that, and in
+        # Solaris there's /usr/xpg4/bin/grep that does the same. Not sure what
+        # happens in other old systems.
+        GREP=`which /usr/xpg4/bin/grep || which grep`
+    
+        echo foo | $GREP -q foo >&2
+    
+        if [ $? -ne 0 ]; then
+            cry 'ERROR: Cannot find suitable grep that accepts -q option!'
+            exit 1
+        fi
+    
+        gab "init: Found suitable grep: \"$GREP\""
+    fi
+fi
+
+# We need a way to get current UNIX timestamp. In modern systems
+# we can use `date +'%s'`; in Solaris that format is not supported
+# so we hack around with nawk instead. Other systems TBD.
+DATE=
+
+date +'%s' | grep '%s' >&2
+
+if [ $? -ne 0 ]; then
+    DATE="date +'%s'"
+else
+    which nawk >&2
+
+    if [ $? -ne 0 ]; then
+        cry "ERROR: Cannot find neither suitable 'date' nor 'nawk'!"
+        exit 1
+    fi
+
+    DATE="nawk 'BEGIN {srand();print srand();}' 2>/dev/null"
+fi
+
+gab "init: Found date command: \"$DATE\""
+
+FIFO= PARENT_PID= HATCHERY_PID= SLEEP_PID= CAT_PID= SSH_PIDS=
+
+get_ssh_pids () {
+    if [ ! "$HATCHERY_PID" ]; then
+        gab "get_ssh_pids: Missing hatchery process pid!"
+        return 1
+    fi
+    
+    gab "get_ssh_pids: Have hatchery process pid: $HATCHERY_PID"
+    
+	SSH_BASENAME=`basename "$SSH"`
+    SSH_PID=`pgrep -P "$HATCHERY_PID" "$SSH_BASENAME"`
+    
+    if [ -z "$SSH_PID" ]; then
+        gab "get_ssh_pids: No ssh process found!"
+        return 1
+    fi
+    
+    gab "get_ssh_pids: Found main ssh process with pid: $SSH_PID"
+    
+    # ssh can be using ProxyCommand to connect so there might be one or more
+    # child processes to take care of.
+    SSH_CHILDREN=`pgrep -P $SSH_PID`
+    SSH_PIDS="$SSH_PID $SSH_CHILDREN"
+    
+    if [ "$SSH_CHILDREN" ]; then
+        gab "get_ssh_pids: Found child ssh processes: $SSH_CHILDREN"
+    else
+        gab "get_ssh_pids: No child ssh processes found."
+    fi
+}
+
+stop_ssh () {
+	gab "stop_ssh: looking for ssh process pids"
+
+    get_ssh_pids
+
+	if [ "$SSH_PIDS" != "" ]; then
+		gab "stop_ssh: got ssh pids: $SSH_PIDS"
+	else
+		gab "stop_ssh: cannot find ssh processes, already killed?"
+		return 1
+	fi
+    
+    yak "Stopping ssh processes: $SSH_PIDS"
+
+    kill -TERM $SSH_PIDS
+}
+
+kill_sleeper () {
+    [ ! -z "$SLEEP_PID" ] && kill -TERM "$SLEEP_PID"
+}
+
+terminate () {
+	say "$OWN_BASENAME received exit signal"
+    gab 'terminate: Stopping child processes'
+
+    # We need to skip the parent to do cleanup below
+    trap '' TERM
+
+    kill -TERM 0
+
+    if [ $? -ne 0 ]; then
+        yak "ERROR Stopping processes failed: $?"
+    fi
+
+    if [ "$FIFO" ]; then
+        gab "terminate: removing pipe \"$FIFO\""
+        rm "$FIFO" >&2
+    fi
+    
+    if [ "$KEEPSSH_PIDFILE" ]; then
+        gab "terminate: removing pidfile \"$KEEPSSH_PIDFILE\""
+        rm "$KEEPSSH_PIDFILE" >&2
+    fi
+
+    say "$OWN_BASENAME exiting"
+
+	if [ "$1" != "" ]; then
+		exit $1
+	else
+		exit 0
+	fi
+}
+
+loggery () {
+    # This warning can be configured in the script but we don't
+    # list it as configurable option hence no KEEPSSH_ prefix.
+    PORT_WARNING=${PORT_WARNING-'port forwarding fail'}
+
+    gab "loggery: Warning pattern is: \"$PORT_WARNING\""
+
+    (
+        while true; do
+            # Prevent fork bomb in case the pipe fell away
+            if [ ! -p "$FIFO" ]; then
+                gab "loggery: pipe $FIFO went away!"
+                exit 1
+            fi
+            
+            gab "loggery: Listening for warnings on pipe $FIFO"
+
+			if [ "$QUIET" ]; then
+				$GREP -q "$PORT_WARNING" <"$FIFO" >&2
+			else
+			    # AFAIK /dev/fd is not exactly POSIX compliant but
+			    # it is supported on all systems that I have.
+			    # Let's see if anybody complains.
+				tee <"$FIFO" /dev/fd/4 | $GREP -q "$PORT_WARNING" >&2
+			fi
+
+            if [ $? -eq 0 ]; then
+                say 'ERROR Port forwarding failed, stopping ssh'
+                
+                # We don't know ssh process id because it can be
+                # restarted many times and there's no easy way to
+                # propagate that data to this subprocess. So we signal
+                # the parent process instead, which we know beforehand.
+                kill -USR1 $PARENT_PID
+            else
+                gab "loggery: grep exited with code $?"
+            fi
+
+            # There can be more than one warning if user requested
+            # multiple ports forwarded. grep -q will exit immediately
+            # after encountering the first one, and the rest might
+            # still be waiting in the pipe when this loop completes
+            # and grep is executed again.
+            # There is no backwards compatible way to discard stdin
+            # so we just hope that 1 second will be enough to read
+            # everything that is still in the pipe but not too much
+            # so that next warning is missed.
+            gab "loggery: flushing pipe input"
+            
+            cat "$FIFO" >/dev/null 2>&1 &
+            CAT_PID=$!
+            
+            ( sleep 1; kill "$CAT_PID"; ) >&2
+            
+            wait $CAT_PID
+        done
+    ) &
+}
+
+hatchery () {
+    MIN_TIMEOUT=${KEEPSSH_TIMEOUT-5}
+    MAX_TIMEOUT=${KEEPSSH_MAX_TIMEOUT-300}
+    TIMEOUT=
+
+    gab "hatchery: min timeout is $MIN_TIMEOUT, max is $MAX_TIMEOUT"
+    gab "hatchery: Using command line: $SSH $OPTIONS $ARGUMENTS"
+    
+    if [ "$FORK" ]; then
+        trap 'kill_sleeper; exit 0' INT TERM
+    fi
+
+    while true; do
+        say "$OWN_BASENAME starting ssh"
+
+        LAST_ATTEMPT=`eval $DATE`
+        EXIT_CODE=
+        
+        gab "hatchery: attempting ssh connection at $LAST_ATTEMPT"
+            
+        if [ "$NEED_LOGGERY" ]; then
+			# Prevent fork bomb if pipe fell away for some reason
+			if [ ! -p "$FIFO" ]; then
+				cry "ERROR: named pipe $FIFO went away!"
+				kill -TERM "$PARENT_PID"
+			fi
+
+            exec 2>"$FIFO"
+        else
+            exec 2>&4
+		fi
+
+        $SSH $OPTIONS $ARGUMENTS
+		EXIT_CODE=$?
+		
+		exec 2>/dev/null
+
+        gab "hatchery: ssh exited with code \"$EXIT_CODE\""
+
+        # Normal exit means user terminated the session, otherwise
+        # exit code is not zero. Bourne shell matches '' as -eq 0!
+        if [ ! -z "$EXIT_CODE" ] && [ "$EXIT_CODE" -eq 0 ]; then
+			gab "hatchery: exit code is 0, terminating normally"
+            return 0
+        fi
+
+        CURRENT_TIME=`eval $DATE`
+        ELAPSED=`expr $CURRENT_TIME - $LAST_ATTEMPT`
+        
+        gab "hatchery: current unix time is $CURRENT_TIME"
+        gab "hatchery: $ELAPSED seconds elapsed since last attempt"
+
+        if [ ! -z "$TIMEOUT" ] && [ "$ELAPSED" -lt "$MIN_TIMEOUT" ]; then
+            TIMEOUT=`expr $TIMEOUT '*' 2`
+            gab "hatchery: timeout increased to $TIMEOUT seconds"
+        else
+            TIMEOUT=$MIN_TIMEOUT
+            gab "hatchery: timeout reset to $TIMEOUT seconds"
+        fi
+
+        if [ "$TIMEOUT" -gt "$MAX_TIMEOUT" ]; then
+            TIMEOUT=$MAX_TIMEOUT
+            gab "hatchery: timeout maxed out at $TIMEOUT seconds"
+        fi
+
+        say "ssh exited with code $EXIT_CODE, restarting after $TIMEOUT seconds"
+
+		# wait could have been terminated by a signal in a previous
+		# loop cycle. In that case there is a chance that a sleeper
+		# process was left behind.
+		kill_sleeper
+
+        # This is to allow reacting to signals while sleeping,
+        # otherwise signal will kick in only after sleep exits!
+        sleep "$TIMEOUT" >&2
+		SLEEP_PID=$!
+
+        wait $SLEEP_PID >&2
+        
+        gab "hatchery: wait terminated with code $?"
+    done
+}
+
+say "$OWN_BASENAME starting up"
+gab "main: starting with pid $$"
+
+if [ "$FORK" ]; then
+    # When we need the pipe we need it both in hatchery and loggery,
+    # so it comes first.
+    if [ "$NEED_LOGGERY" ]; then
+        FIFO=`mktemp ${KEEPSSH_FIFO-/tmp/sock.XXXXXXX}`
+        rm "$FIFO" && mkfifo "$FIFO"
+    
+        if [ ! -p "$FIFO" ]; then
+            cry "ERROR: Cannot create stderr FIFO pipe: $?"
+            exit 1
+        fi
+        
+        gab "main: opened loggery pipe $FIFO"
+    fi
+    
+    gab "main: starting hatchery process"
+    
+    hatchery &
+    HATCHERY_PID=$!
+    
+    gab "main: hatchery started with pid $HATCHERY_PID"
+
+    (
+        trap stop_ssh USR1
+        trap terminate HUP INT TERM
+        
+        gab "main subprocess: Entering main loop"
+            
+        while true; do
+            kill_sleeper
+
+            sleep 9999 >&2 &
+			SLEEP_PID=$!
+
+            wait $SLEEP_PID >&2
+        done
+        
+        gab "main subprocess: exiting"
+    ) &
+    
+    PARENT_PID=$!
+    
+    gab "main: started background subprocess with pid $PARENT_PID"
+    
+    # Loggery subshell needs to be aware of the PARENT_PID,
+    # hence started after main process when forking
+    if [ "$NEED_LOGGERY" ]; then
+        loggery
+        
+        gab "main: started loggery subprocess with pid $!"
+    fi
+else
+    PARENT_PID=$$
+    HATCHERY_PID=$$
+fi
+
+if [ "$KEEPSSH_PIDFILE" ]; then
+    gab "main: storing pid $PARENT_PID in pidfile $KEEPSSH_PIDFILE"
+    echo $PARENT_PID >"$KEEPSSH_PIDFILE"
+fi
+
+if [ ! "$FORK" ]; then
+    trap terminate HUP INT TERM
+    
+    gab "main: entering hatchery loop"
+    
+	hatchery
+	
+	gab "main: exited hatchery loop"
+fi
+
+exit 0
