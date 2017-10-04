@@ -25,8 +25,8 @@
 # DEALINGS IN THE SOFTWARE.
 
 if [ "$KEEPSSH_DEBUG" ]; then
-	[ "$KEEPSSH_DEBUG" -gt 1 ] && set -xv
-	[ "$KEEPSSH_DEBUG" -gt 0 ] && set -x
+    [ "$KEEPSSH_DEBUG" -gt 1 ] && set -xv
+    [ "$KEEPSSH_DEBUG" -gt 0 ] && set -x
 fi
 
 # We're always logging on stderr like ssh does but we don't want
@@ -49,7 +49,7 @@ QUIET=
 
 # We also need to know if ssh was requested to fork and go into background
 # so that we could do the same. We don't pass this argument to ssh though
-# because it is kind of awkward finding its pid after it's forked.
+# because it is kind of awkward finding its pid after it has forked.
 FORK=
 
 # That said, sometimes it's not handy to redirect stderr so we support
@@ -58,17 +58,17 @@ FORK=
 if [ "$KEEPSSH_LOGFILE" ]; then
     exec 4>>"$KEEPSSH_LOGFILE"
 
-	if [ "$KEEPSSH_NO_TIMESTAMP" ]; then
-		TIMESTAMP=false
-	else
-		TIMESTAMP=date
-	fi
+    if [ "$KEEPSSH_NO_TIMESTAMP" ]; then
+        TIMESTAMP=false
+    else
+        TIMESTAMP=date
+    fi
 fi
 
 OWN_BASENAME=`basename $0`
 
 cry () {
-	# Sometimes it's helpful to know when the error happened
+    # Sometimes it's helpful to know when the error happened
     echo `$TIMESTAMP` "$@" >&4
 }
 
@@ -219,7 +219,7 @@ get_ssh_pids () {
     
     gab "get_ssh_pids: Have hatchery process pid: $HATCHERY_PID"
     
-	SSH_BASENAME=`basename "$SSH"`
+    SSH_BASENAME=`basename "$SSH"`
     SSH_PID=`pgrep -P "$HATCHERY_PID" "$SSH_BASENAME"`
     
     if [ -z "$SSH_PID" ]; then
@@ -242,16 +242,16 @@ get_ssh_pids () {
 }
 
 stop_ssh () {
-	gab "stop_ssh: looking for ssh process pids"
+    gab "stop_ssh: looking for ssh process pids"
 
     get_ssh_pids
 
-	if [ "$SSH_PIDS" != "" ]; then
-		gab "stop_ssh: got ssh pids: $SSH_PIDS"
-	else
-		gab "stop_ssh: cannot find ssh processes, already killed?"
-		return 1
-	fi
+    if [ "$SSH_PIDS" != "" ]; then
+        gab "stop_ssh: got ssh pids: $SSH_PIDS"
+    else
+        gab "stop_ssh: cannot find ssh processes, already killed?"
+        return 1
+    fi
     
     yak "Stopping ssh processes: $SSH_PIDS"
 
@@ -263,7 +263,7 @@ kill_sleeper () {
 }
 
 terminate () {
-	say "$OWN_BASENAME received exit signal"
+    say "$OWN_BASENAME received exit signal"
     gab 'terminate: Stopping child processes'
 
     # We need to skip the parent to do cleanup below
@@ -287,11 +287,11 @@ terminate () {
 
     say "$OWN_BASENAME exiting"
 
-	if [ "$1" != "" ]; then
-		exit $1
-	else
-		exit 0
-	fi
+    if [ "$1" != "" ]; then
+        exit $1
+    else
+        exit 0
+    fi
 }
 
 loggery () {
@@ -311,14 +311,14 @@ loggery () {
             
             gab "loggery: Listening for warnings on pipe $FIFO"
 
-			if [ "$QUIET" ]; then
-				$GREP -q "$PORT_WARNING" <"$FIFO" >&2
-			else
-			    # AFAIK /dev/fd is not exactly POSIX compliant but
-			    # it is supported on all systems that I have.
-			    # Let's see if anybody complains.
-				tee <"$FIFO" /dev/fd/4 | $GREP -q "$PORT_WARNING" >&2
-			fi
+            if [ "$QUIET" ]; then
+                $GREP -q "$PORT_WARNING" <"$FIFO" >&2
+            else
+                # AFAIK /dev/fd is not exactly POSIX compliant but
+                # it is supported on all systems that I have.
+                # Let's see if anybody complains.
+                tee <"$FIFO" /dev/fd/4 | $GREP -q "$PORT_WARNING" >&2
+            fi
 
             if [ $? -eq 0 ]; then
                 say 'ERROR Port forwarding failed, stopping ssh'
@@ -374,28 +374,28 @@ hatchery () {
         gab "hatchery: attempting ssh connection at $LAST_ATTEMPT"
             
         if [ "$NEED_LOGGERY" ]; then
-			# Prevent fork bomb if pipe fell away for some reason
-			if [ ! -p "$FIFO" ]; then
-				cry "ERROR: named pipe $FIFO went away!"
-				kill -TERM "$PARENT_PID"
-			fi
+            # Prevent fork bomb if pipe fell away for some reason
+            if [ ! -p "$FIFO" ]; then
+                cry "ERROR: named pipe $FIFO went away!"
+                kill -TERM "$PARENT_PID"
+            fi
 
             exec 2>"$FIFO"
         else
             exec 2>&4
-		fi
+        fi
 
         $SSH $OPTIONS $ARGUMENTS
-		EXIT_CODE=$?
-		
-		exec 2>/dev/null
+        EXIT_CODE=$?
+        
+        exec 2>/dev/null
 
         gab "hatchery: ssh exited with code \"$EXIT_CODE\""
 
         # Normal exit means user terminated the session, otherwise
         # exit code is not zero. Bourne shell matches '' as -eq 0!
-        if [ ! -z "$EXIT_CODE" ] && [ "$EXIT_CODE" -eq 0 ]; then
-			gab "hatchery: exit code is 0, terminating normally"
+        if [ ! -z "$EXIT_CODE" -a "$EXIT_CODE" -eq 0 ]; then
+            gab "hatchery: exit code is 0, terminating normally"
             return 0
         fi
 
@@ -405,7 +405,7 @@ hatchery () {
         gab "hatchery: current unix time is $CURRENT_TIME"
         gab "hatchery: $ELAPSED seconds elapsed since last attempt"
 
-        if [ ! -z "$TIMEOUT" ] && [ "$ELAPSED" -lt "$MIN_TIMEOUT" ]; then
+        if [ ! -z "$TIMEOUT" -a "$ELAPSED" -lt "$MIN_TIMEOUT" ]; then
             TIMEOUT=`expr $TIMEOUT '*' 2`
             gab "hatchery: timeout increased to $TIMEOUT seconds"
         else
@@ -420,15 +420,15 @@ hatchery () {
 
         say "ssh exited with code $EXIT_CODE, restarting after $TIMEOUT seconds"
 
-		# wait could have been terminated by a signal in a previous
-		# loop cycle. In that case there is a chance that a sleeper
-		# process was left behind.
-		kill_sleeper
+        # wait could have been terminated by a signal in a previous
+        # loop cycle. In that case there is a chance that a sleeper
+        # process was left behind.
+        kill_sleeper
 
         # This is to allow reacting to signals while sleeping,
         # otherwise signal will kick in only after sleep exits!
         sleep "$TIMEOUT" >&2
-		SLEEP_PID=$!
+        SLEEP_PID=$!
 
         wait $SLEEP_PID >&2
         
@@ -471,7 +471,7 @@ if [ "$FORK" ]; then
             kill_sleeper
 
             sleep 9999 >&2 &
-			SLEEP_PID=$!
+            SLEEP_PID=$!
 
             wait $SLEEP_PID >&2
         done
@@ -505,9 +505,9 @@ if [ ! "$FORK" ]; then
     
     gab "main: entering hatchery loop"
     
-	hatchery
-	
-	gab "main: exited hatchery loop"
+    hatchery
+    
+    gab "main: exited hatchery loop"
 fi
 
 exit 0
